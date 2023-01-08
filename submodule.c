@@ -1368,6 +1368,17 @@ int submodule_touches_in_range(struct repository *r,
 	return ret;
 }
 
+struct submodule_parallel_status {
+	size_t index_count;
+	int result;
+
+	struct string_list *submodule_names;
+
+	/* Pending statuses by OIDs */
+	struct status_task **oid_status_tasks;
+	int oid_status_tasks_nr, oid_status_tasks_alloc;
+};
+
 struct submodule_parallel_fetch {
 	/*
 	 * The index of the last index entry processed by
@@ -1448,6 +1459,12 @@ struct fetch_task {
 	struct strvec git_args; /* Args for the child git process. */
 
 	struct oid_array *commits; /* Ensure these commits are fetched */
+};
+
+struct status_task {
+	const char *path;
+	struct strbuf out;
+	int ignore_untracked;
 };
 
 /**
@@ -1869,83 +1886,200 @@ out:
 	return spf.result;
 }
 
-unsigned is_submodule_modified(const char *path, int ignore_untracked)
+static void parse_status_porcelain(struct strbuf *buf,
+				   unsigned *dirty_submodule,
+				   int ignore_untracked)
 {
-	struct child_process cp = CHILD_PROCESS_INIT;
-	struct strbuf buf = STRBUF_INIT;
-	FILE *fp;
-	unsigned dirty_submodule = 0;
-	const char *git_dir;
-	int ignore_cp_exit_code = 0;
+	struct string_list list = STRING_LIST_INIT_DUP;
+	struct string_list_item *item;
 
-	strbuf_addf(&buf, "%s/.git", path);
-	git_dir = read_gitfile(buf.buf);
-	if (!git_dir)
-		git_dir = buf.buf;
-	if (!is_git_directory(git_dir)) {
-		if (is_directory(git_dir))
-			die(_("'%s' not recognized as a git repository"), git_dir);
-		strbuf_release(&buf);
-		/* The submodule is not checked out, so it is not modified */
-		return 0;
-	}
-	strbuf_reset(&buf);
+	string_list_split(&list, buf->buf, '\n', -1);
 
-	strvec_pushl(&cp.args, "status", "--porcelain=2", NULL);
-	if (ignore_untracked)
-		strvec_push(&cp.args, "-uno");
-
-	prepare_submodule_repo_env(&cp.env);
-	cp.git_cmd = 1;
-	cp.no_stdin = 1;
-	cp.out = -1;
-	cp.dir = path;
-	if (start_command(&cp))
-		die(_("Could not run 'git status --porcelain=2' in submodule %s"), path);
-
-	fp = xfdopen(cp.out, "r");
-	while (strbuf_getwholeline(&buf, fp, '\n') != EOF) {
+	for_each_string_list_item(item, &list) {
+		char *str = item->string;
 		/* regular untracked files */
-		if (buf.buf[0] == '?')
-			dirty_submodule |= DIRTY_SUBMODULE_UNTRACKED;
+		if (str[0] == '?')
+			*dirty_submodule |= DIRTY_SUBMODULE_UNTRACKED;
 
-		if (buf.buf[0] == 'u' ||
-		    buf.buf[0] == '1' ||
-		    buf.buf[0] == '2') {
+		if (str[0] == 'u' ||
+		str[0] == '1' ||
+		str[0] == '2') {
 			/* T = line type, XY = status, SSSS = submodule state */
-			if (buf.len < strlen("T XY SSSS"))
+			if (strlen(str) < strlen("T XY SSSS"))
 				BUG("invalid status --porcelain=2 line %s",
-				    buf.buf);
+				str);
 
-			if (buf.buf[5] == 'S' && buf.buf[8] == 'U')
+			if (str[5] == 'S' && str[8] == 'U')
 				/* nested untracked file */
-				dirty_submodule |= DIRTY_SUBMODULE_UNTRACKED;
+				*dirty_submodule |= DIRTY_SUBMODULE_UNTRACKED;
 
-			if (buf.buf[0] == 'u' ||
-			    buf.buf[0] == '2' ||
-			    memcmp(buf.buf + 5, "S..U", 4))
+			if (str[0] == 'u' ||
+			str[0] == '2' ||
+			memcmp(str + 5, "S..U", 4))
 				/* other change */
-				dirty_submodule |= DIRTY_SUBMODULE_MODIFIED;
+				*dirty_submodule |= DIRTY_SUBMODULE_MODIFIED;
 		}
 
-		if ((dirty_submodule & DIRTY_SUBMODULE_MODIFIED) &&
-		    ((dirty_submodule & DIRTY_SUBMODULE_UNTRACKED) ||
-		     ignore_untracked)) {
+		if ((*dirty_submodule & DIRTY_SUBMODULE_MODIFIED) &&
+		    ((*dirty_submodule & DIRTY_SUBMODULE_UNTRACKED) ||
+		    ignore_untracked)) {
 			/*
-			 * We're not interested in any further information from
-			 * the child any more, neither output nor its exit code.
-			 */
-			ignore_cp_exit_code = 1;
+			* We're not interested in any further information from
+			* the child any more, neither output nor its exit code.
+			*/
 			break;
 		}
 	}
-	fclose(fp);
+	string_list_clear(&list, 0);
+}
 
-	if (finish_command(&cp) && !ignore_cp_exit_code)
-		die(_("'git status --porcelain=2' failed in submodule %s"), path);
+unsigned is_submodule_modified(const char *path, int ignore_untracked)
+{
+	struct submodule_status_util util = {
+		.dirty_submodule = 0,
+		.ignore_untracked = ignore_untracked,
+		.path = path,
+	};
+	struct string_list sub = STRING_LIST_INIT_NODUP;
+	struct string_list_item *item;
 
-	strbuf_release(&buf);
-	return dirty_submodule;
+	item = string_list_append(&sub, path);
+	item->util = &util;
+	if (get_submodules_status(&sub, 1))
+		die(_("submodule status failed"));
+	return util.dirty_submodule;
+}
+
+static struct status_task *
+get_status_task_from_index(struct submodule_parallel_status *sps,
+			   struct strbuf *err)
+{
+	for (; sps->index_count < sps->submodule_names->nr; sps->index_count++) {
+		struct submodule_status_util *util = sps->submodule_names->items[sps->index_count].util;
+		struct status_task *task;
+		struct strbuf buf = STRBUF_INIT;
+		const char *git_dir;
+
+		strbuf_addf(&buf, "%s/.git", util->path);
+		git_dir = read_gitfile(buf.buf);
+		if (!git_dir)
+			git_dir = buf.buf;
+		if (!is_git_directory(git_dir)) {
+			if (is_directory(git_dir))
+				die(_("'%s' not recognized as a git repository"), git_dir);
+			strbuf_release(&buf);
+			/* The submodule is not checked out, so it is not modified */
+			util->dirty_submodule = 0;
+			continue;
+		}
+		strbuf_release(&buf);
+
+		task = xmalloc(sizeof(*task));
+		task->path = util->path;
+		task->ignore_untracked = util->ignore_untracked;
+		strbuf_init(&task->out, 0);
+		sps->index_count++;
+		return task;
+	}
+	return NULL;
+}
+
+static int get_next_submodule_status(struct child_process *cp,
+				     struct strbuf *err, void *data,
+				     void **task_cb)
+{
+	struct submodule_parallel_status *sps = data;
+	struct status_task *task = get_status_task_from_index(sps, err);
+
+	if (!task)
+		return 0;
+
+	child_process_init(cp);
+	prepare_submodule_repo_env_in_gitdir(&cp->env);
+
+	strvec_init(&cp->args);
+	strvec_pushl(&cp->args, "status", "--porcelain=2", NULL);
+	if (task->ignore_untracked)
+		strvec_push(&cp->args, "-uno");
+
+	prepare_submodule_repo_env(&cp->env);
+	cp->git_cmd = 1;
+	cp->dir = task->path;
+	*task_cb = task;
+	return 1;
+}
+
+static int status_start_failure(struct strbuf *err,
+				void *cb, void *task_cb)
+{
+	struct submodule_parallel_status *sps = cb;
+	struct status_task *task = task_cb;
+
+	sps->result = 1;
+	strbuf_addf(err,
+	    _("could not run 'git status --porcelain=2' in submodule %s"),
+	    task->path);
+	return 0;
+}
+
+static void status_duplicate_output(struct strbuf *out,
+				    size_t offset,
+				    void *cb, void *task_cb)
+{
+	struct status_task *task = task_cb;
+
+	strbuf_add(&task->out, out->buf + offset, out->len - offset);
+	strbuf_setlen(out, offset);
+}
+
+static int status_finish(int retvalue, struct strbuf *err,
+			 void *cb, void *task_cb)
+{
+	struct submodule_parallel_status *sps = cb;
+	struct status_task *task = task_cb;
+	struct string_list_item *it =
+		string_list_lookup(sps->submodule_names, task->path);
+	struct submodule_status_util *util = it->util;
+
+	if (retvalue) {
+		sps->result = 1;
+		strbuf_addf(err,
+		    _("'git status --porcelain=2' failed in submodule %s"),
+		    task->path);
+	}
+
+	parse_status_porcelain(&task->out,
+			       &util->dirty_submodule,
+			       util->ignore_untracked);
+
+	free(task);
+
+	return 0;
+}
+
+int get_submodules_status(struct string_list *submodules,
+			  int max_parallel_jobs)
+{
+	struct submodule_parallel_status sps = {
+		.submodule_names = submodules,
+	};
+	const struct run_process_parallel_opts opts = {
+		.tr2_category = "submodule",
+		.tr2_label = "parallel/status",
+
+		.processes = max_parallel_jobs,
+
+		.get_next_task = get_next_submodule_status,
+		.start_failure = status_start_failure,
+		.duplicate_output = status_duplicate_output,
+		.task_finished = status_finish,
+		.data = &sps,
+	};
+
+	string_list_sort(sps.submodule_names);
+	run_processes_parallel(&opts);
+
+	return sps.result;
 }
 
 int submodule_uses_gitfile(const char *path)

@@ -221,4 +221,40 @@ test_expect_success 'fatal descriptions on non-existent branch' '
 	test_cmp expect actual
 '
 
+test_expect_success 'error descriptions on orphan or unborn-yet branch' '
+	cat >expect <<-EOF &&
+	error: No commit on branch '\''orphan-branch'\'' yet.
+	EOF
+	test_when_finished git worktree remove -f orphan-worktree &&
+	git worktree add orphan-worktree --detach &&
+	git -C orphan-worktree checkout --orphan orphan-branch &&
+	test_must_fail git -C orphan-worktree branch --edit-description 2>actual && # implicit branch
+	test_cmp expect actual &&
+	test_must_fail git -C orphan-worktree branch --edit-description orphan-branch 2>actual && # explicit branch
+	test_cmp expect actual &&
+	test_must_fail git branch --edit-description orphan-branch 2>actual && # different worktree
+	test_cmp expect actual
+'
+
+test_expect_success 'fatal descriptions on orphan or unborn-yet branch' '
+	cat >expect <<-EOF &&
+	fatal: No commit on branch '\''orphan-branch'\'' yet.
+	EOF
+	test_when_finished git worktree remove -f orphan-worktree &&
+	git worktree add orphan-worktree --detach &&
+	git -C orphan-worktree checkout --orphan orphan-branch &&
+	test_must_fail git -C orphan-worktree branch --set-upstream-to=non-existent 2>actual && # implicit branch
+	test_cmp expect actual &&
+	test_must_fail git -C orphan-worktree branch --set-upstream-to=non-existent orphan-branch 2>actual && # explicit branch
+	test_cmp expect actual &&
+	test_must_fail git branch --set-upstream-to=non-existent orphan-branch 2>actual && # different worktree
+	test_cmp expect actual &&
+	test_must_fail git -C orphan-worktree branch -c new-branch 2>actual && # implicit branch
+	test_cmp expect actual &&
+	test_must_fail git -C orphan-worktree branch -c orphan-branch new-branch 2>actual && # explicit branch
+	test_cmp expect actual &&
+	test_must_fail git branch -c orphan-branch new-branch 2>actual && # different worktree
+	test_cmp expect actual
+'
+
 test_done

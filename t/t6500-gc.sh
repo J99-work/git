@@ -56,6 +56,7 @@ test_expect_success 'gc -h with invalid configuration' '
 '
 
 test_expect_success 'gc is not aborted due to a stale symref' '
+	test_when_finished "rm -rf remote client" &&
 	git init remote &&
 	(
 		cd remote &&
@@ -200,6 +201,24 @@ test_expect_success 'one of gc.reflogExpire{Unreachable,}=never does not skip "e
 	test_config gc.reflogExpire never &&
 	GIT_TRACE=$(pwd)/trace.out git gc &&
 	grep -E "^trace: (built-in|exec|run_command): git reflog expire --" trace.out
+'
+
+test_expect_success 'gc.repackFilter launches repack with a filter' '
+	test_when_finished "rm -rf server client" &&
+	test_create_repo server &&
+	git -C server config uploadpack.allowFilter true &&
+	git -C server config uploadpack.allowAnySHA1InWant true &&
+	test_commit -C server 1 &&
+	git clone --bare --no-local server client &&
+	git -C client config remote.origin.promisor true &&
+	git -C client rev-list --objects --all --missing=print >objects &&
+	test $(grep -c "^?" objects) = 0 &&
+
+	GIT_TRACE=$(pwd)/trace.out git -C client -c gc.repackFilter=blob:none -c repack.writeBitmaps=false -c gc.pruneExpire=now gc &&
+
+	grep -E "^trace: (built-in|exec|run_command): git repack .* --filter=blob:none ?.*" trace.out &&
+	git -C client rev-list --objects --all --missing=print >objects &&
+	test $(grep -c "^?" objects) = 1
 '
 
 prepare_cruft_history () {

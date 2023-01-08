@@ -130,6 +130,15 @@ or rebase occurring.  Since these changes are not part of the current
 project most users will want to expire them sooner, which is why the
 default is more aggressive than `gc.reflogExpire`.
 
+gc.repackFilter::
+	When repacking, use the specified filter to omit certain
+	objects from the resulting packfile. WARNING: this could
+	easily corrupt the current repo and lose data if ANY of the
+	omitted objects hasn't been already pushed to a remote. Be
+	very careful about objects that might have been created
+	locally! See the `--filter=<filter-spec>` option of
+	linkgit:git-repack[1].
+
 gc.rerereResolved::
 	Records of conflicted merge you resolved earlier are
 	kept for this many days when 'git rerere gc' is run.

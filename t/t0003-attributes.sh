@@ -25,14 +25,21 @@ attr_check_quote () {
 	git check-attr test -- "$path" >actual &&
 	echo "\"$quoted_path\": test: $expect" >expect &&
 	test_cmp expect actual
+}
 
+attr_check_source () {
+	path="$1" expect="$2" source="$3" git_opts="$4" &&
+
+	git $git_opts check-attr --source $source test -- "$path" >actual 2>err &&
+	echo "$path: test: $expect" >expect &&
+	test_cmp expect actual
+	test_must_be_empty err
 }
 
 test_expect_success 'open-quoted pathname' '
 	echo "\"a test=a" >.gitattributes &&
 	attr_check a unspecified
 '
-
 
 test_expect_success 'setup' '
 	mkdir -p a/b/d a/c b &&
@@ -80,12 +87,24 @@ test_expect_success 'setup' '
 	EOF
 '
 
+test_expect_success 'setup branches' '
+	mkdir -p foo/bar &&
+	test_commit --printf "add .gitattributes" foo/bar/.gitattribute \
+		"f test=f\na/i test=n\n" tag-1 &&
+
+	mkdir -p foo/bar &&
+	test_commit --printf "add .gitattributes" foo/bar/.gitattribute \
+		"g test=g\na/i test=m\n" tag-2
+'
+
 test_expect_success 'command line checks' '
 	test_must_fail git check-attr &&
 	test_must_fail git check-attr -- &&
 	test_must_fail git check-attr test &&
 	test_must_fail git check-attr test -- &&
 	test_must_fail git check-attr -- f &&
+	test_must_fail git check-attr --source &&
+	test_must_fail git check-attr --source not-a-valid-ref &&
 	echo "f" | test_must_fail git check-attr --stdin &&
 	echo "f" | test_must_fail git check-attr --stdin -- f &&
 	echo "f" | test_must_fail git check-attr --stdin test -- f &&
@@ -203,9 +222,12 @@ test_expect_success 'attribute test: read paths from stdin' '
 	test_cmp expect actual
 '
 
-test_expect_success 'attribute test: --all option' '
+test_expect_success 'setup --all option' '
 	grep -v unspecified <expect-all | sort >specified-all &&
-	sed -e "s/:.*//" <expect-all | uniq >stdin-all &&
+	sed -e "s/:.*//" <expect-all | uniq >stdin-all
+'
+
+test_expect_success 'attribute test: --all option' '
 	git check-attr --stdin --all <stdin-all >tmp &&
 	sort tmp >actual &&
 	test_cmp specified-all actual
@@ -284,6 +306,15 @@ test_expect_success 'using --git-dir and --work-tree' '
 	)
 '
 
+test_expect_success 'using --source' '
+	attr_check_source foo/bar/f f tag-1 &&
+	attr_check_source foo/bar/a/i n tag-1 &&
+	attr_check_source foo/bar/f unspecified tag-2 &&
+	attr_check_source foo/bar/a/i m tag-2 &&
+	attr_check_source foo/bar/g g tag-2 &&
+	attr_check_source foo/bar/g unspecified tag-1
+'
+
 test_expect_success 'setup bare' '
 	git clone --template= --bare . bare.git
 '
@@ -300,6 +331,18 @@ test_expect_success 'bare repository: check that .gitattribute is ignored' '
 		attr_check a/c/f unspecified &&
 		attr_check a/i unspecified &&
 		attr_check subdir/a/i unspecified
+	)
+'
+
+test_expect_success 'bare repository: with --source' '
+	(
+		cd bare.git &&
+		attr_check_source foo/bar/f f tag-1 &&
+		attr_check_source foo/bar/a/i n tag-1 &&
+		attr_check_source foo/bar/f unspecified tag-2 &&
+		attr_check_source foo/bar/a/i m tag-2 &&
+		attr_check_source foo/bar/g g tag-2 &&
+		attr_check_source foo/bar/g unspecified tag-1
 	)
 '
 

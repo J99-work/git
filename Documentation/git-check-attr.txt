@@ -9,8 +9,8 @@ git-check-attr - Display gitattributes information
 SYNOPSIS
 --------
 [verse]
-'git check-attr' [-a | --all | <attr>...] [--] <pathname>...
-'git check-attr' --stdin [-z] [-a | --all | <attr>...]
+'git check-attr' [--source <tree>] [-a | --all | <attr>...] [--] <pathname>...
+'git check-attr' --stdin [-z] [--source <tree>] [-a | --all | <attr>...]
 
 DESCRIPTION
 -----------
@@ -35,6 +35,12 @@ OPTIONS
 	The output format is modified to be machine-parsable.
 	If `--stdin` is also given, input paths are separated
 	with a NUL character instead of a linefeed character.
+
+--source=<tree>::
+	Check attributes against the specified tree-ish. Paths provided as part
+	of the revision will be treated as the root directory. It is common to
+	specify the source tree by naming a commit, branch or tag associated
+	with it.
 
 \--::
 	Interpret all preceding arguments as attributes and all following
